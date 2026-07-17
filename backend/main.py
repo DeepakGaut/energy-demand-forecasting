@@ -1,53 +1,106 @@
-"""
-backend/main.py
-================
-Skeleton FastAPI app for Day 2-3 infrastructure work (Deepak's task).
+"""FastAPI application for serving regional carbon-intensity data."""
 
-This file exists only to prove the docker-compose stack (postgres,
-redis, fastapi) runs healthy end-to-end. It intentionally does NOT
-implement /ci/{region} or /calculate - those are Paramjeet's Day 2-3
-deliverables and should be added to this same file (or split into
-routers under backend/) without touching the Docker wiring below.
-"""
+from __future__ import annotations
 
 import os
+from collections.abc import Generator
+from datetime import datetime
 
 import redis
-from fastapi import FastAPI, HTTPException
-from sqlalchemy import create_engine, text
+from fastapi import Depends, FastAPI, HTTPException, Path
+from pydantic import BaseModel, ConfigDict
+from sqlalchemy import select, text
+from sqlalchemy.orm import Session
 
-app = FastAPI(title="EcoCompute Backend")
+from backend.db.database import SessionLocal, engine
+from backend.db.models import CITimeseries
 
-DATABASE_URL = os.environ["DATABASE_URL"]
-REDIS_URL = os.environ["REDIS_URL"]
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-redis_client = redis.Redis.from_url(REDIS_URL)
+app = FastAPI(title="EcoCompute Backend", version="0.1.0")
+redis_client = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+
+
+class CIRecord(BaseModel):
+    """A daily carbon-intensity observation and its generation mix."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    timestamp: datetime
+    ci_gco2e_per_kwh: float
+    coal_pct: float | None
+    hydro_pct: float | None
+    wind_pct: float | None
+    solar_pct: float | None
+    nuclear_pct: float | None
+    gas_pct: float | None
+
+
+class CIResponse(BaseModel):
+    region: str
+    days: int
+    data: list[CIRecord]
+
+
+def get_db() -> Generator[Session, None, None]:
+    """Provide a database session for one request."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 @app.get("/")
-def root() -> dict:
+def root() -> dict[str, str]:
     return {"message": "EcoCompute backend is up"}
 
 
 @app.get("/health")
-def health() -> dict:
-    """Confirms postgres and redis are both reachable from the fastapi container."""
+def health() -> dict[str, str]:
+    """Confirm that the API's PostgreSQL and Redis dependencies are reachable."""
     status = {"postgres": "unknown", "redis": "unknown"}
 
     try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
         status["postgres"] = "ok"
-    except Exception as exc:  # noqa: BLE001
-        status["postgres"] = f"error: {exc}"
+    except Exception:  # noqa: BLE001 - do not expose infrastructure details
+        status["postgres"] = "error"
 
     try:
         redis_client.ping()
         status["redis"] = "ok"
-    except Exception as exc:  # noqa: BLE001
-        status["redis"] = f"error: {exc}"
+    except Exception:  # noqa: BLE001 - do not expose infrastructure details
+        status["redis"] = "error"
 
-    if "error" in status["postgres"] or "error" in status["redis"]:
+    if "error" in status.values():
         raise HTTPException(status_code=503, detail=status)
     return status
+
+
+@app.get("/ci/{region}", response_model=CIResponse)
+def get_recent_ci(
+    region: str = Path(..., min_length=2, max_length=10, pattern=r"^[A-Za-z]+$"),
+    db: Session = Depends(get_db),
+) -> CIResponse:
+    """Return the latest 30 daily CI records for one region, oldest first."""
+    normalized_region = region.upper()
+    latest_rows = (
+        db.execute(
+            select(CITimeseries)
+            .where(CITimeseries.region == normalized_region)
+            .order_by(CITimeseries.timestamp.desc())
+            .limit(30)
+        )
+        .scalars()
+        .all()
+    )
+
+    if not latest_rows:
+        raise HTTPException(status_code=404, detail=f"No CI data found for region '{normalized_region}'")
+
+    return CIResponse(
+        region=normalized_region,
+        days=len(latest_rows),
+        data=[CIRecord.model_validate(row) for row in reversed(latest_rows)],
+    )
