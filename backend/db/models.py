@@ -60,6 +60,7 @@ class HardwareSpecs(Base):
     model_name = Column(String(100), nullable=False, unique=True)  # e.g. "NVIDIA A100"
     hardware_type = Column(String(10), nullable=False)             # "CPU" or "GPU"
     tdp_watts = Column(Float, nullable=False)                      # Thermal Design Power
+    total_cores = Column(Integer, nullable=False)                  # cores on the whole device
 
     def __repr__(self):
         return f"<HardwareSpecs {self.model_name} ({self.hardware_type}) {self.tdp_watts}W>"
