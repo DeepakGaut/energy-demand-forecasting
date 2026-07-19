@@ -139,64 +139,166 @@ The scoring logic here is a pure function and technically could have been built 
 
 ---
 
-## Phase 6 — Task Queue + Minimal Interface ("Week 7")
+## Phase 6 — Frontend ("Week 7")
 
-RabbitMQ/Celery setup is pure infra and could be stood up any time earlier if you have downtime — it doesn't touch any of the modeling work.
+Decision: the task queue (RabbitMQ/Celery, deferred execution, job_outcomes, 
+Flower) is dropped entirely. POST /schedule already returns a full 
+recommendation synchronously — there's no "queued → executing → complete" 
+lifecycle to build a UI around, since nothing runs asynchronously. This phase 
+is now 100% frontend, built as a proper interface, not a minimal one.
 
-**Day 1 — RabbitMQ + Celery** *[standalone — no data dependency]*
-> Prompt Copilot: "Add RabbitMQ to docker-compose.yml (rabbitmq:3-management image, web UI at localhost:15672). Set up Celery from scratch to connect to it as a broker. Test with a trivial task first."
+Tech stack unchanged: Next.js + Tailwind + Recharts.
 
-**Day 2 — Deferred job execution** *[depends on: Phase 2 calculator, Phase 5 schedule endpoint]*
-> Prompt Copilot: "Define `execute_deferred_job(job_id, job_params, target_region, scheduled_time)` as a Celery task using `apply_async(eta=scheduled_time)`. It should run the calculator for the target region, fetch actual CI at execution time, compute actual vs. predicted carbon, and log the outcome."
+**New, small backend addition (flagging — confirm before building):**
+> Prompt Copilot: "Add GET /decisions — returns the most recent N rows from 
+> scheduling_decisions (job_id, submitted_at, default_region, 
+> recommended_region, recommended_time, predicted_saving_gco2e), paginated or 
+> limited to the latest 50 by default. This powers a decision-history view in 
+> the frontend."
 
-**Day 3 — Outcome logging + monitoring**
-> Prompt Copilot: "Create the `job_outcomes` table (job_id, predicted/actual region, ci, carbon, saving vs. immediate execution, saving vs. worst region) and wire it into the Celery task's logging step. Add Celery Flower as a new Docker service for live queue monitoring (localhost:5555). Add `GET /job/{job_id}` returning job status."
+**Day 1 — Scaffolding + design system**
+> Prompt Copilot: "Scaffold a Next.js + Tailwind app. Set up a clean design 
+> system: color palette (tie it to carbon intensity — e.g. green→red gradient 
+> for low→high CI), typography, a shared layout with navigation between pages 
+> (Calculator, Schedule, Regions, History). Build a typed API client wrapper 
+> for all backend endpoints (/calculate, /schedule, /compare-regions, 
+> /forecast/compare, /decisions) so pages don't hand-roll fetch calls."
 
-**Day 4–5 — Minimal frontend** *[depends on: Phase 5's /schedule, this phase's /job endpoint]*
-> Prompt Copilot: "Build a minimal Next.js frontend: a job submission form (cores, memory, runtime, flexibility window, urgency toggle), a 'Get Recommendation' button calling `POST /schedule`, a results panel, and a job status view polling `GET /job/{job_id}` showing queued → scheduled → executing → complete, with actual vs. predicted carbon cost once a job finishes."
+**Day 2 — Calculator + Schedule pages**
+> Prompt Copilot: "Build the Calculator page: a form for hardware selection, 
+> core count, memory, runtime, PUE — calls POST /calculate, shows the 
+> resulting CO2e clearly (with the ci_source: measured/forecasted label 
+> visible, not hidden). Build the Schedule page: job submission form (cores, 
+> memory, runtime, flexibility window, urgency toggle) calling POST /schedule, 
+> displaying the full recommendation — region, time (or 'run now'), predicted 
+> saving, confidence — as a clear result card, not a raw JSON dump."
+
+**Day 3 — Region comparison + forecast visualizations**
+> Prompt Copilot: "Build a Regions page: a bar chart (Recharts) ranking all 5 
+> regions by current CI, using GET /compare-regions for a given job spec. Add 
+> a line chart showing each region's 60-day forecasted CI curve from 
+> GET /forecast/compare?horizon=60, so a user can visually see which regions 
+> trend greener over the coming weeks."
+
+**Day 4 — Decision history dashboard**
+> Prompt Copilot: "Build a History page reading from GET /decisions: a table 
+> of past scheduling recommendations (date, default region, recommended 
+> region, predicted saving), plus a summary stat card at the top (total 
+> predicted savings across all logged decisions, most-recommended region)."
+
+**Day 5 — Polish pass**
+> Prompt Copilot: "Polish pass across all pages: responsive layout (mobile + 
+> desktop), loading states for every API call, clear error states (e.g. 
+> backend down, invalid input), empty states (e.g. no decisions logged yet). 
+> Final visual review — consistent spacing, typography, and the CI 
+> color-coding applied consistently across Calculator, Schedule, and Regions 
+> pages. Prepare for Vercel deployment (env vars for backend URL)."
 
 **End of Phase 6 deliverables**
-- [ ] RabbitMQ + Celery running and tested
-- [ ] `execute_deferred_job` fully implemented with ETA scheduling
-- [ ] `job_outcomes` table logging predicted vs. actual
-- [ ] Celery Flower running; `GET /job/{job_id}` working
-- [ ] Minimal frontend: submission form, recommendation panel, job status view
-- [ ] End-to-end test passed 5 times: submit → queue → fire at ETA → log outcome → visible in UI
+- [ ] GET /decisions endpoint added and tested
+- [ ] Calculator page — working, shows ci_source clearly
+- [ ] Schedule page — working, clear recommendation display
+- [ ] Regions page — bar chart (current CI) + line chart (60-day forecast)
+- [ ] History dashboard — table + summary stats from real logged decisions
+- [ ] Fully responsive, with loading/error/empty states handled
+- [ ] Deployed to Vercel (or ready to deploy)
+
+**Explicitly dropped from this phase:** RabbitMQ, Celery, execute_deferred_job, 
+job_outcomes table, Celery Flower, GET /job/{job_id}. If deferred/async job 
+execution becomes relevant later (e.g. for a live demo), it can be revisited 
+as a separate addition — not part of this plan.
 
 ---
 
 ## Phase 7 — Evaluation ("Week 8"; no paper writing)
 
-This has to come last — it needs every real component (trained models, working scheduler, working queue) in place.
+This has to come last — it needs every real component in place: trained models, 
+working scheduler, working frontend. (Task queue dropped per Phase 6 decision — 
+no Celery/RabbitMQ references below.)
 
 **Day 1 — Forecasting accuracy, final numbers**
-> Prompt Copilot: "Re-run the evaluation harness on the final ARIMA, Prophet, and LSTM models across all 5 regions on the held-out test window. Produce a clean final results table (MAE, RMSE, MAPE per model per region)."
+> Prompt Copilot: "Re-run the evaluation harness on the final ARIMA, Prophet, 
+> and LSTM models across all 5 regions on the held-out test window. Produce a 
+> clean final results table (MAE, RMSE, MAPE per model per region)."
 
 **Day 2 — Scheduling effectiveness**
-> Prompt Copilot: "Define a job trace of ~50 synthetic jobs (varied cores/memory/runtime/region). Run two conditions: baseline (every job runs immediately in its submitted region) vs. treatment (every job goes through the scheduler). Compare total carbon cost using the real CEA emission factors. Compute % reduction and average saving per job."
+> Prompt Copilot: "Define a job trace of ~50 synthetic jobs (varied 
+> cores/memory/runtime/region). Run two conditions: baseline (every job runs 
+> immediately in its submitted region) vs. treatment (every job goes through 
+> the scheduler). Compare total carbon cost using the real CEA emission 
+> factors. Compute % reduction and average saving per job. Use the same 
+> wall-clock-forecasted CI convention as the live API (Phase 5/6 update) so 
+> this evaluation is consistent with what the deployed system actually 
+> reports — not the old fixed-dataset-relative dates."
 
 **Day 3 — Ablation study**
-> Prompt Copilot: "On the same 50-job trace, compare 3 scheduler variants: spatial-only (best region, run immediately), temporal-only (same region, best time), and full spatiotemporal (best region and time). Isolate how much each dimension contributes to total savings."
+> Prompt Copilot: "On the same 50-job trace, compare 3 scheduler variants: 
+> spatial-only (best region, run immediately), temporal-only (same region, 
+> best time), and full spatiotemporal (best region and time). Isolate how much 
+> each dimension contributes to total savings. For the 'full' condition, 
+> compute the true saving directly as CI(default_region, now) − 
+> CI(chosen_region, chosen_time) rather than summing the spatial and temporal 
+> components separately — we've confirmed that additive sum overstates savings 
+> when both a region and time shift happen together (documented in 
+> POST /schedule's response model)."
+
+> **KNOWN LIMITATION — temporal signal is near-zero with plain ARIMA (model choice, not a bug).**
+> The per-region ARIMA forecast's multi-day rollout converges to a near-flat 
+> value within ~2-3 days (verified live: NR sits at ~523.232 gCO2e/kWh from 
+> day 3 of a 60-day forecast onward). Because the flexibility window is almost 
+> constant, ci_now ≈ min(window), so the scheduler's **temporal term produces 
+> ~0 saving and rarely/never recommends a time shift** — the **spatial** 
+> (region-shift) term is doing essentially all the useful work today. Expect 
+> the ablation to show: spatial-only ≈ full spatiotemporal, and temporal-only 
+> ≈ baseline (~0% reduction). This is an explainable property of ARIMA at long 
+> horizons, not a defect in the scoring logic (see the comment on 
+> `score_scheduling` in `backend/decision.py`). Reviving a meaningful temporal 
+> signal would require a seasonal model (e.g. SARIMA / Prophet with 
+> seasonality); treat that as future work when interpreting Phase 7 results.
 
 **Day 4 — System hardening**
-> Prompt Copilot: "Add timeouts to every endpoint and graceful failure handling for Celery task failures. Run a final pass checking each endpoint fails cleanly under bad input."
+> Prompt Copilot: "Add timeouts to every backend endpoint and graceful failure 
+> handling for bad/missing inputs (unknown region, invalid hardware, malformed 
+> job specs). Run a final pass confirming each endpoint fails cleanly with a 
+> clear error message under bad input — no unhandled 500s. Also verify the 
+> frontend handles backend downtime and slow responses gracefully (loading/ 
+> error states from Phase 6's polish pass)."
 
 **Day 5 — Demo + sanity check**
-> Prompt Copilot: "Help me write a small `demo.py` script that submits a handful of test jobs and prints the before/after carbon comparison — this should be reliable for a live demo independent of real-time grid conditions."
-Record a short demo video of the full flow. Sanity-check that the three result sets line up (e.g., does higher forecast error correlate with lower scheduling savings in the same region?).
+> Prompt Copilot: "Help me write a small `demo.py` script that submits a 
+> handful of test jobs through the real API and prints the before/after 
+> carbon comparison — reliable for a live demo regardless of what day it's 
+> run, since the wall-clock forecast remapping means 'today' always has a 
+> valid forecasted CI. Also do a full walkthrough of the actual frontend 
+> (Calculator → Schedule → Regions → History) as the primary demo path, with 
+> demo.py as a backend-only fallback."
+Record a short demo video of the full flow through the frontend. Sanity-check 
+that the three result sets line up (e.g., does higher forecast error correlate 
+with lower scheduling savings in the same region?).
 
 **End of Phase 7 deliverables**
 - [ ] Final forecasting accuracy table: ARIMA vs. Prophet vs. LSTM, all 5 regions
 - [ ] Scheduling effectiveness result: % carbon reduction vs. baseline on the 50-job trace
-- [ ] Ablation study: spatial-only vs. temporal-only vs. full spatiotemporal
-- [ ] System hardened, demo video recorded
+- [ ] Ablation study: spatial-only vs. temporal-only vs. full spatiotemporal (using the corrected, non-additive saving calculation for the "full" condition)
+- [ ] System hardened (backend + frontend), demo video recorded through the actual UI
 - [ ] **Paper writing is a separate, later phase — not part of this plan.**
 
 ---
 
 ## Working with Copilot (Opus 4.8) in VS Code, solo
 
-- Open only the files relevant to the current day's task before prompting — Opus 4.8 does better with a focused context than the whole repo dumped in.
-- Review every diff before accepting. Given you're newer to this Python/Windows tooling stack, read what changed even when it looks right — that's how you catch a wrong assumption (e.g., Copilot inventing a `coal_pct` column that shouldn't exist) before it compounds three phases later.
-- Commit after each completed day-task, not at the end of a phase — makes it easy to roll back one bad Copilot suggestion without losing the rest.
-- When a prompt above says "[depends on: …]", paste that dependency's actual file/table name into the Copilot prompt for context, not just the abstract description.
+- Open only the files relevant to the current day's task before prompting — 
+  Opus 4.8 does better with a focused context than the whole repo dumped in.
+- Review every diff before accepting. Read what changed even when it looks 
+  right — that's how you catch a wrong assumption (e.g., a stale/hardcoded 
+  date, or a schema mismatch) before it compounds phases later.
+- Commit after each completed day-task, not at the end of a phase — makes it 
+  easy to roll back one bad suggestion without losing the rest.
+- When a prompt says "[depends on: …]", paste that dependency's actual 
+  file/table name into the prompt for context, not just the abstract 
+  description.
+- When something looks surprisingly good (a suspiciously low error, a metric 
+  that barely changed when it should have gotten harder), don't take it at 
+  face value — ask for the underlying evidence (day-by-day values, not just 
+  aggregates) before trusting it. This pattern caught real issues multiple 
+  times already in this project.

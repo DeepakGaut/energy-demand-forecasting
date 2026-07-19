@@ -12,6 +12,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/ ./backend/
+# The API imports the forecasting package and loads the per-region ARIMA models
+# at request time (GET /forecast/*, POST /schedule), so both must be in the image.
+COPY forecasting/ ./forecasting/
+COPY models/arima/ ./models/arima/
 
 EXPOSE 8000
 

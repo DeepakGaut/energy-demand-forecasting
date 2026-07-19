@@ -64,3 +64,37 @@ class HardwareSpecs(Base):
 
     def __repr__(self):
         return f"<HardwareSpecs {self.model_name} ({self.hardware_type}) {self.tdp_watts}W>"
+
+
+class SchedulingDecision(Base):
+    """Audit log of every recommendation the decision engine produces.
+
+    One row is written each time the scheduler scores a job, capturing where/
+    when the job would have run by default, where/when it was recommended to
+    run instead, and the predicted carbon saving of that recommendation.
+    """
+
+    __tablename__ = "scheduling_decisions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_id = Column(String(64), nullable=False)               # caller-supplied job identifier
+    submitted_at = Column(DateTime(timezone=True), nullable=False)
+
+    default_region = Column(String(10), nullable=False)       # where the job would run by default
+    recommended_region = Column(String(10), nullable=False)   # region the engine recommends
+    recommended_time = Column(DateTime(timezone=True), nullable=True)  # null == run now
+
+    predicted_saving_gco2e = Column(Float, nullable=False)    # estimated carbon saved (gCO2e)
+    urgency_weight = Column(Float, nullable=False)            # 0..1 urgency used for this decision
+
+    __table_args__ = (
+        # Look up all decisions for a given job quickly.
+        Index("ix_scheduling_decisions_job_id", "job_id"),
+    )
+
+    def __repr__(self):
+        return (
+            f"<SchedulingDecision job_id={self.job_id} "
+            f"{self.default_region}->{self.recommended_region} "
+            f"saving={self.predicted_saving_gco2e}>"
+        )
