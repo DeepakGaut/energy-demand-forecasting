@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -10,14 +11,17 @@ from collections.abc import Generator
 from datetime import date, datetime, timezone
 
 import redis
-from fastapi import Depends, FastAPI, HTTPException, Path, Query
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from backend.carbon import DEFAULT_PUE, compute_carbon_footprint
 from backend.db.database import SessionLocal, engine
-from backend.db.models import CITimeseries, HardwareSpecs
+from backend.db.models import CITimeseries, HardwareSpecs, SchedulingDecision
 from backend.decision import record_decision, score_scheduling
 from forecasting.features import REGIONS
 from forecasting.serve import BEST_MODEL, forecast_region
@@ -25,6 +29,68 @@ from forecasting.serve import BEST_MODEL, forecast_region
 
 app = FastAPI(title="EcoCompute Backend", version="0.1.0")
 redis_client = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+
+# Allow the frontend (a separate origin) to call the API from the browser.
+# Origins are configurable via FRONTEND_ORIGINS (comma-separated) so the Vercel
+# deployment URL can be added without a code change; defaults to local dev.
+_frontend_origins = [
+    origin.strip()
+    for origin in os.getenv("FRONTEND_ORIGINS", "http://localhost:3000").split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_frontend_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# Hard ceiling on how long any single request may run before the client gets a
+# clean 504 instead of a connection that hangs indefinitely (e.g. if a forecast
+# or database call stalls). Configurable via env for slower deployments.
+REQUEST_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "30"))
+
+
+@app.middleware("http")
+async def timeout_middleware(request: Request, call_next):
+    """Fail slow requests cleanly with a 504 rather than hanging the client."""
+    try:
+        return await asyncio.wait_for(
+            call_next(request), timeout=REQUEST_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            status_code=504,
+            content={
+                "detail": (
+                    f"Request timed out after {REQUEST_TIMEOUT_SECONDS:.0f}s. "
+                    "Please try again."
+                )
+            },
+        )
+
+
+@app.exception_handler(SQLAlchemyError)
+async def _sqlalchemy_error_handler(
+    request: Request, exc: SQLAlchemyError
+) -> JSONResponse:
+    """Turn any database failure into a clean 503 (never a raw 500)."""
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Database temporarily unavailable. Please try again."},
+    )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Safety net: no unexpected error ever leaks as an unhandled 500."""
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error."},
+    )
+
 
 # Cache time-to-live (seconds). CI data refreshes at most daily, so an hour is
 # a safe bound; the date component in the key also forces a daily refresh.
@@ -350,6 +416,41 @@ class ScheduleResponse(BaseModel):
         ),
     )
     confidence: float
+
+
+class DecisionRecord(BaseModel):
+    """One logged scheduling decision, as returned by ``GET /decisions``."""
+
+    job_id: str
+    submitted_at: datetime
+    default_region: str
+    recommended_region: str
+    recommended_time: datetime | None  # null == run now
+    predicted_saving_gco2e: float
+
+
+class DecisionsResponse(BaseModel):
+    """The most recent scheduling decisions, newest first."""
+
+    count: int
+    limit: int
+    decisions: list[DecisionRecord]
+
+
+class HardwareSpec(BaseModel):
+    """One selectable hardware device, as returned by ``GET /hardware``."""
+
+    model_name: str
+    hardware_type: str
+    tdp_watts: float
+    total_cores: int
+
+
+class HardwareListResponse(BaseModel):
+    """All hardware devices available for job specs (drives frontend dropdowns)."""
+
+    count: int
+    hardware: list[HardwareSpec]
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -974,3 +1075,79 @@ def schedule_job(
         spatial_saving_gco2e=round(spatial_saving_gco2e, 3),
         confidence=round(confidence, 4),
     )
+
+
+@app.get("/decisions", response_model=DecisionsResponse)
+def get_decisions(
+    limit: int = Query(
+        50,
+        ge=1,
+        le=200,
+        description="Maximum number of most-recent decisions to return.",
+    ),
+    db: Session = Depends(get_db),
+) -> DecisionsResponse:
+    """Return the most recent scheduling decisions, newest first.
+
+    Powers the frontend's decision-history view. Ordered by ``submitted_at``
+    descending (with ``id`` as a stable tiebreaker) and capped at ``limit``.
+    """
+    rows = (
+        db.execute(
+            select(SchedulingDecision)
+            .order_by(
+                SchedulingDecision.submitted_at.desc(),
+                SchedulingDecision.id.desc(),
+            )
+            .limit(limit)
+        )
+        .scalars()
+        .all()
+    )
+
+    decisions = [
+        DecisionRecord(
+            job_id=row.job_id,
+            submitted_at=row.submitted_at,
+            default_region=row.default_region,
+            recommended_region=row.recommended_region,
+            recommended_time=row.recommended_time,
+            predicted_saving_gco2e=row.predicted_saving_gco2e,
+        )
+        for row in rows
+    ]
+
+    return DecisionsResponse(count=len(decisions), limit=limit, decisions=decisions)
+
+
+@app.get("/hardware", response_model=HardwareListResponse)
+def get_hardware(db: Session = Depends(get_db)) -> HardwareListResponse:
+    """List every hardware device in ``hardware_specs``.
+
+    Powers the Calculator/Schedule dropdowns and lets the frontend validate that
+    a job's requested cores do not exceed the device's total. Ordered by type
+    (CPU/GPU) then model name for a stable, readable list.
+    """
+    rows = (
+        db.execute(
+            select(HardwareSpecs).order_by(
+                HardwareSpecs.hardware_type,
+                HardwareSpecs.model_name,
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    hardware = [
+        HardwareSpec(
+            model_name=row.model_name,
+            hardware_type=row.hardware_type,
+            tdp_watts=row.tdp_watts,
+            total_cores=row.total_cores,
+        )
+        for row in rows
+    ]
+
+    return HardwareListResponse(count=len(hardware), hardware=hardware)
+
