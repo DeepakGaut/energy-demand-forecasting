@@ -7,8 +7,8 @@ Develop an AI-based electricity demand forecasting system using historical deman
 ## 👥 Team Members
 
 - Deepak Gautam
-- Member 2
-- Member 3
+- Paramjeet Saini
+- Vasudev Joshi
 
 ## 📂 Project Structure
 
