@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+/*
+ * EcoCompute design system.
+ *
+ * The palette is tied to carbon intensity: greens for low-carbon, ambers/oranges
+ * for medium, reds for high. Continuous per-value colors are computed in JS
+ * (see src/lib/ci.ts); the tokens below are the fixed anchors of that scale plus
+ * the neutral UI surface colors.
+ */
+@theme {
+  /* Neutral surfaces */
+  --color-bg: #f4f7f5;
+  --color-surface: #ffffff;
+  --color-surface-muted: #eef2f0;
+  --color-border: #dde5e1;
+  --color-fg: #0f1a17;
+  --color-muted: #566a61;
+
+  /* Brand (low-carbon green) */
+  --color-brand: #16a34a;
+  --color-brand-dark: #15803d;
+  --color-brand-soft: #dcfce7;
+
+  /* Carbon-intensity scale (low -> high) */
+  --color-ci-verylow: #15803d;
+  --color-ci-low: #65a30d;
+  --color-ci-mid: #ca8a04;
+  --color-ci-high: #ea580c;
+  --color-ci-veryhigh: #dc2626;
+
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+}
+
+/* Thin, unobtrusive scrollbars that match the neutral surface. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
